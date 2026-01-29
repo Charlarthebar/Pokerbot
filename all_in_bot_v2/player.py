@@ -1,14 +1,15 @@
 '''
-All-In Bot v2 - Improved defenses against sophisticated opponents
-Changes from original:
+All-In Bot v2.1 - Variable pre-flop sizing to induce action
+Changes from v2:
+  4. Variable pre-flop raise sizing:
+     - QQ+/trips: All-in (opponents fold but these are rare)
+     - TT-JJ: Raise 6x BB to induce calls
+     - 55-99/suited high: Raise 5x BB to induce calls
+
+Previous changes (v2):
   1. Call small pre-flop raises (<=15) instead of always folding
   2. Larger post-flop bet sizing (~50% pot, min 4 chips)
   3. Defend overpairs and top pair against single bets
-
-Core strategy unchanged:
-  - All-in with premium hands (55+, trips, suited high cards)
-  - Lockdown mode when mathematically won
-  - Smart discard logic
 '''
 from skeleton.actions import FoldAction, CallAction, CheckAction, RaiseAction, DiscardAction
 from skeleton.states import GameState, TerminalState, RoundState, NUM_ROUNDS, BIG_BLIND
@@ -50,18 +51,41 @@ class Player(Bot):
             return FoldAction()
 
         # ---------------------------------------------------------
-        # 3. PRE-FLOP STRATEGY
+        # 3. PRE-FLOP STRATEGY (Variable Sizing)
         # ---------------------------------------------------------
         if street == 0:
             my_pip = round_state.pips[active]
             opp_pip = round_state.pips[1 - active]
             continue_cost = opp_pip - my_pip
 
-            if self.is_good_preflop(my_cards):
-                # GOOD HAND -> GO ALL IN
+            hand_tier = self.get_preflop_tier(my_cards)
+
+            if hand_tier > 0:  # We have a playable hand
                 if RaiseAction in legal:
                     min_raise, max_raise = round_state.raise_bounds()
-                    return RaiseAction(max_raise)
+
+                    # TIER 1: QQ+ or Trips -> ALL-IN
+                    if hand_tier == 1:
+                        return RaiseAction(max_raise)
+
+                    # TIER 2: TT-JJ -> Raise 6x BB (12 chips) to induce calls
+                    elif hand_tier == 2:
+                        raise_amount = min(max(min_raise, BIG_BLIND * 6), max_raise)
+                        # If opponent already raised big, just go all-in
+                        if continue_cost > 10:
+                            return RaiseAction(max_raise)
+                        return RaiseAction(raise_amount)
+
+                    # TIER 3: 55-99 or suited high cards -> Raise 5x BB (10 chips)
+                    else:  # hand_tier == 3
+                        raise_amount = min(max(min_raise, BIG_BLIND * 5), max_raise)
+                        # If opponent already raised big, just call or fold
+                        if continue_cost > 15:
+                            if CallAction in legal:
+                                return CallAction()
+                            return FoldAction()
+                        return RaiseAction(raise_amount)
+
                 if CallAction in legal:
                     return CallAction()
                 if CheckAction in legal:
@@ -147,12 +171,13 @@ class Player(Bot):
 
         return DiscardAction(best_discard_index)
 
-    def is_good_preflop(self, cards):
+    def get_preflop_tier(self, cards):
         '''
-        Returns True if hand is:
-        - Trips
-        - Pair (55+)
-        - 3 of the same suit AND sum of card values >= 25
+        Returns hand tier for variable raise sizing:
+        0 = Weak (fold or limp)
+        1 = Premium (QQ+, trips) -> ALL-IN
+        2 = Strong (TT-JJ) -> Raise 6x BB
+        3 = Medium (55-99, suited high cards) -> Raise 5x BB
         '''
         ranks = [self.rank_map[c[0]] for c in cards]
         suits = [c[1] for c in cards]
@@ -172,20 +197,28 @@ class Player(Bot):
             elif count == 3:
                 is_trips = True
 
+        # TIER 1: Trips or QQ+ (Q=10, K=11, A=12)
         if is_trips:
-            return True
+            return 1
+        if is_pair and pair_rank >= 10:  # QQ+
+            return 1
 
-        if is_pair:
-            if pair_rank <= 2:  # 22-44
-                return False
-            return True  # 55+
+        # TIER 2: TT-JJ (T=8, J=9)
+        if is_pair and pair_rank >= 8:  # TT-JJ
+            return 2
 
+        # TIER 3: 55-99 (5=3, 6=4, 7=5, 8=6, 9=7)
+        if is_pair and pair_rank >= 3:  # 55-99
+            return 3
+
+        # TIER 3: Suited high cards (sum >= 25)
         if len(set(suits)) == 1:
             total_val = sum(r + 2 for r in ranks)
             if total_val >= 25:
-                return True
+                return 3
 
-        return False
+        # TIER 0: Weak hand
+        return 0
 
     def get_postflop_strength(self, my_cards, board):
         '''
